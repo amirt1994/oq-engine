@@ -367,11 +367,8 @@ class ClassicalCalculator(base.HazardCalculator):
             acc[source_id] = pm
             pm.grp_id = grp_id
         if pnemap:
-            acc[grp_id].update(pnemap)
-        self.n_outs[grp_id] -= 1
-        if self.n_outs[grp_id] == 0:  # no other tasks for this grp_id
             with self.monitor('storing PoEs', measuremem=True):
-                self.haz.store_poes(grp_id, acc.pop(grp_id))
+                self.haz.store_poes(grp_id, pnemap)
         return acc
 
     def create_dsets(self):
@@ -497,14 +494,11 @@ class ClassicalCalculator(base.HazardCalculator):
             for size in sizes:
                 assert size > oq.max_sites_disagg, (size, oq.max_sites_disagg)
         self.source_data = AccumDict(accum=[])
-        self.n_outs = AccumDict(accum=0)
         acc = {}
         t0 = time.time()
         for t, tile in enumerate(tiles, 1):
             self.check_memory(len(tile), L, num_gs)
             smap = self.submit(tile, self.haz.cmakers, max_weight)
-            for cm in self.haz.cmakers:
-                acc[cm.grp_id] = ProbabilityMap(tile.sids, L, len(cm.gsims)).fill(1)
             smap.reduce(self.agg_dicts, acc)
             if len(tiles) > 1:
                 logging.info('Finished tile %d of %d', t, len(tiles))
@@ -555,21 +549,21 @@ class ClassicalCalculator(base.HazardCalculator):
                 trip = (sg, sids, cmakers[grp_id])
                 triples.append(trip)
                 smap.submit(trip)
-                self.n_outs[grp_id] += 1
             else:  # regroup the sources in blocks
                 blks = (groupby(sg, basename).values()
-                        if oq.disagg_by_src else
-                        block_splitter(
-                            sg, max_weight, get_weight, sort=True))
-                blocks = list(blks)
-                for block in blocks:
-                    logging.debug(
-                        'Sending %d source(s) with weight %d',
-                        len(block), sum(src.weight for src in block))
-                    trip = (block, sids, cmakers[grp_id])
-                    triples.append(trip)
-                    smap.submit(trip)
-                    self.n_outs[grp_id] += 1
+                        if oq.disagg_by_src else [sg])
+
+                for block in blks:
+                    weight = sum(src.weight for src in block)
+                    maxsites = numpy.clip(self.N * max_weight /  weight,
+                                          100, self.N)
+                    for tile in self.sitecol.split_in_tiles(maxsites):
+                        logging.debug(
+                            'Sending %d source(s) with weight %d',
+                            len(block), weight)
+                        trip = (block, tile, cmakers[grp_id])
+                        triples.append(trip)
+                        smap.submit(trip)
         return smap
 
     def collect_hazard(self, acc, pmap_by_kind):
