@@ -533,7 +533,7 @@ class ClassicalCalculator(base.HazardCalculator):
         self.datastore.create_df('source_data', df)
         self.source_data.clear()  # save a bit of memory
 
-    def submit(self, sids, cmakers, max_weight):
+    def submit(self, tile, cmakers, max_weight):
         """
         :returns: a Starmap instance for the current tile
         """
@@ -546,9 +546,10 @@ class ClassicalCalculator(base.HazardCalculator):
             sg = self.csm.src_groups[grp_id]
             if sg.atomic:
                 # do not split atomic groups
-                trip = (sg, sids, cmakers[grp_id])
+                trip = (sg, tile, cmakers[grp_id])
                 triples.append(trip)
                 smap.submit(trip)
+
             else:  # regroup the sources in blocks
                 blks = (groupby(sg, basename).values()
                         if oq.disagg_by_src else [sg])
