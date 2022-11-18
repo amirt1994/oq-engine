@@ -480,7 +480,8 @@ class ClassicalCalculator(base.HazardCalculator):
         parallelizing on the sources according to their weight and
         tectonic region type.
         """
-        if self.oqparam.hazard_calculation_id:
+        oq = self.oqparam
+        if oq.hazard_calculation_id:
             parent = self.datastore.parent
             if '_poes' in parent:
                 self.build_curves_maps()  # repeat post-processing
@@ -488,41 +489,19 @@ class ClassicalCalculator(base.HazardCalculator):
             else:  # after preclassical, like in case_36
                 logging.info('Reading from parent calculation')
                 self.csm = parent['_csm']
-                self.oqparam.mags_by_trt = {
+                oq.mags_by_trt = {
                     trt: python3compat.decode(dset[:])
                     for trt, dset in parent['source_mags'].items()}
                 self.full_lt = parent['full_lt']
                 self.datastore['source_info'] = parent['source_info'][:]
-                maxw = self.csm.get_max_weight(self.oqparam)
+                maxw = self.csm.get_max_weight(oq)
         else:
             maxw = self.max_weight
         self.init_poes()
         srcidx = {
             rec[0]: i for i, rec in enumerate(self.csm.source_info.values())}
         self.haz = Hazard(self.datastore, self.full_lt, srcidx)
-        t0 = time.time()
-        if self.oqparam.save_memory:
-            self.execute_large(maxw)
-        else:
-            self.execute_small(maxw)
-        self.store_info()
-        if self.cfactor[0] == 0:
-            raise RuntimeError('Filtered away all ruptures??')
-        logging.info('cfactor = {:_d}/{:_d} = {:.1f}'.format(
-            int(self.cfactor[1]), int(self.cfactor[0]),
-            self.cfactor[1] / self.cfactor[0]))
-        if '_poes' in self.datastore:
-            self.build_curves_maps()
-        if not self.oqparam.hazard_calculation_id:
-            self.classical_time = time.time() - t0
-        return True
-
-    def execute_small(self, maxw):
-        """
-        Method called when save_memory=False
-        """
-        oq = self.oqparam
-        self.create_dsets()  # create the rup/ datasets BEFORE swmr_on()
+        self.source_data = AccumDict(accum=[])
         max_gs = max(len(cm.gsims) for cm in self.haz.cmakers)
         L = oq.imtls.size
         # maximum size of the pmap array in GB
@@ -535,6 +514,29 @@ class ClassicalCalculator(base.HazardCalculator):
             tiles = self.sitecol.split_max(oq.max_sites_per_tile)
         else:
             tiles = [self.sitecol]
+        t0 = time.time()
+        if oq.save_memory or len(tiles) > 1:
+            self.execute_large(maxw, max_gs, tiles)
+        else:
+            self.execute_small(maxw, max_gs, tiles)
+        self.store_info()
+        if self.cfactor[0] == 0:
+            raise RuntimeError('Filtered away all ruptures??')
+        logging.info('cfactor = {:_d}/{:_d} = {:.1f}'.format(
+            int(self.cfactor[1]), int(self.cfactor[0]),
+            self.cfactor[1] / self.cfactor[0]))
+        if '_poes' in self.datastore:
+            self.build_curves_maps()
+        if not oq.hazard_calculation_id:
+            self.classical_time = time.time() - t0
+        return True
+
+    def execute_small(self, maxw, max_gs, tiles):
+        """
+        Method called when save_memory=False
+        """
+        oq = self.oqparam
+        self.create_dsets()  # create the rup/ datasets BEFORE swmr_on()
         if len(tiles) > 1:
             maxw /= 1.35  # producing a bit more tasks (~2.7 x num_cores)
             sizes = [len(tile) for tile in tiles]
@@ -543,7 +545,6 @@ class ClassicalCalculator(base.HazardCalculator):
             for size in sizes:
                 assert size > oq.max_sites_disagg, (size, oq.max_sites_disagg)
         self.check_memory(len(tiles[0]), oq.imtls.size, max_gs, maxw)
-        self.source_data = AccumDict(accum=[])
         self.n_outs = AccumDict(accum=0)
         acc = {}
         for t, tile in enumerate(tiles, 1):
@@ -553,19 +554,16 @@ class ClassicalCalculator(base.HazardCalculator):
                 logging.info('Finished tile %d of %d', t, len(tiles))
         self.haz.store_disagg(acc)
 
-    def execute_large(self, maxw):
+    def execute_large(self, maxw, max_gs, tiles):
         """
         Method called when save_memory=True
         """
-        max_gs = max(len(cm.gsims) for cm in self.haz.cmakers)
         groups = []
         for grp_id, sg in enumerate(self.csm.src_groups):
             sg.grp_id = grp_id
             groups.append(sg)
         self.datastore.swmr_on()  # must come before the Starmap
         smap = parallel.Starmap(classical, h5=self.datastore.hdf5)
-        tiles = self.sitecol.split_max(numpy.ceil(self.N / 4))
-        self.source_data = AccumDict(accum=[])
         for grp in sorted(groups, key=lambda grp: grp.weight, reverse=True):
             cmaker = self.haz.cmakers[grp.grp_id]
             if grp.weight <= maxw:
